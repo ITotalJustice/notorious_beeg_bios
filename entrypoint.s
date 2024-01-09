@@ -19,13 +19,13 @@ swi_HardReset:
     strb r0, [r0, #8]
 
     msr cpsr, #MODE_SYS
-    
+
     bl reset_modes
     mov r0, #0xff
     bl swi_RegisterRamReset
-    
+
     bl BootScreen
-    
+
     mov r0, #0xff
     bl swi_RegisterRamReset
     @ r0 needs to contain 0x04000000 for the inline with swi_SoftReset to work
@@ -42,7 +42,7 @@ swi_HardReset:
     @ 0082 - 880e
     @ 0088 - 0200
     @ 0134 - 8000
-    @ out BIOS still comes out with 
+    @ out BIOS still comes out with
     @ 0004 - 0008
     @ 0008 - 0007
     @ 004a - 3001
@@ -57,20 +57,20 @@ swi_HardReset:
         strh r3, [r0, r2]
         cmp r1, #.hard_reset_IO_values_end
         blt .hard_reset_IO_setup
-    
+
     @ clear registers that should be 0
     strh r0, [r0, #(REG_DISPSTAT - MMIO_BASE)]
     strh r0, [r0, #(REG_BG0CNT - MMIO_BASE)]
     strh r0, [r0, #(REG_WINOUT - MMIO_BASE)]
     add r1, r0, #(REG_IME - MMIO_BASE)
     strh r0, [r1]
-    
+
     msr cpsr_cf, #MODE_SYS
     mov r0, #0
     mov r1, #0
     mov r2, #0
     mov r3, #0
-        
+
     mov lr, #ROM_ENTRYPOINT
     bx lr
 
@@ -99,43 +99,54 @@ reset_modes:
     msr cpsr_cf, #MODE_SVC
     ldr sp, =#SVC_STACK
     mov lr, #0
-    msr spsr_cf, lr 
+    msr spsr_cf, lr
     msr cpsr_c, #MODE_IRQ
     ldr sp, =#IRQ_STACK
     mov lr, #0
     msr spsr_cf, lr
     msr cpsr_cf, #MODE_SYS
     ldr sp, =#SYS_STACK
-    
+
     @ clear 0x200 bytes of RAM from 0x03007d00 to 0x03007fff
     @ r0 still contains 0x04000000 from HardReset or SoftReset!
     ldr r1, =#-0x200
     mov r2, #0
-    
+
     .soft_reset_RAM_clear:
         str r2, [r0, r1]
         adds r1, #4
         bne .soft_reset_RAM_clear
-    
+
     @ load all registers from 0 cleared RAM
     ldmfa r0, { r0-r12 }
-    
+
     @ Jump into the ROM or RAM
     bx lr
 
 exception_irq:
     stmfd sp!, {r0-r3, r12, lr}
+
+    @ set openbus value for entering irq
+    ldr r2, =#HLE_IRQ_BEG_VALUE
+    bl set_openbus_value
+
     mov r0, #0x04000000
     add lr, pc, #0
     ldr pc, [r0, #-4]
+
+    @ set openbus value for leaving irq
+    ldr r2, =#HLE_IRQ_END_VALUE
+    bl set_openbus_value
+
     ldmfd sp!, {r0-r3, r12, lr}
     subs pc, lr, #4
 
 exception_swi:
-    stmfd sp!, {r11-r12, lr}
+    stmfd sp!, {r8, r11-r12, lr}
 
     @ extract SWI call number from the opcode
     ldrb r12, [lr, #-2]
+    mov r8, r12 @ set hle bios call number
     adr r11, swi_table
     ldr r12, [r11, r12, lsl #2]
 
@@ -153,10 +164,30 @@ exception_swi:
     @ save system mode lr because we overwrite it in the next instruction.
     stmfd sp!, {r2, lr}
 
+    @ ask beeg if it can handle this bios call
+    @ we do this by passing the bios value to beeg
+    @ and check r11 for the result
+    stmfd sp!, { r9-r11 }
+    mov r9, #HLE_CMD_BIOS
+    ldr r10, =#HLE_MAGIC
+    ldr r11, =#HLE_ADDR
+    strh r9, [r11]
+
+    @ check r9, if set, it was handled, otherwise handle swi normally
+    @ HLE_CMD_BIOS is 0x0 so this doubles as a check to see
+    @ if the emulator did anything at all with this write
+    cmp r9, #0
+    ldmfd sp!, { r9-r11 }
+    bne .swi_handler_done
+
     @ set return address and jump to the SWI handler.
     adr lr, .swi_handler_done
     bx r12
 .swi_handler_done:
+    @ set openbus value for leaving swi
+    ldr r2, =#HLE_SWI_VALUE
+    bl set_openbus_value
+
     @ restore system saved registers
     ldmfd sp!, {r2, lr}
 
@@ -171,7 +202,7 @@ exception_swi:
     msr spsr_fc, r11
 
     @ restore supervisor saved registers and return
-    ldmfd sp!, {r11-r12, lr}
+    ldmfd sp!, {r8, r11-r12, lr}
     movs pc, lr
 
 exception_undefined:
@@ -180,7 +211,17 @@ exception_undefined:
 @ prefetch abort, data abort, reserved, fast IRQ
 exception_unused:
     b $
-    
+
+@ r2 = openbus value
+set_openbus_value:
+    stmfd sp!, { r9-r11 }
+    mov r9, #HLE_CMD_OPENBUS
+    ldr r10, =#HLE_MAGIC
+    ldr r11, =#HLE_ADDR
+    strh r9, [r11]
+    ldmfd sp!, { r9-r11 }
+    bx lr
+
 @ the real BIOS yolo's out-of-bound SWIs, so we might as well do it too
 swi_table:
     .word swi_SoftReset
@@ -234,7 +275,7 @@ swi_DoNothing:
 
 swi_GetBiosChecksum:
     @ GBATek says this should be the value resulting in r0 for a proper ROM's checksum
-    @ In the end, this BIOS is directed more towards emulators, and it wouldn't matter much 
+    @ In the end, this BIOS is directed more towards emulators, and it wouldn't matter much
     @ if "not properly checksummed" ROMs can't run with it
     ldr r0, =#0xBAAE187F
     bx lr
@@ -249,7 +290,3 @@ swi_GetBiosChecksum:
 .include "boot_screen/boot_screen.s"
 
 .pool
-
-@ This probably isn't best practice... whatever.
-.org 16384
-padding:
